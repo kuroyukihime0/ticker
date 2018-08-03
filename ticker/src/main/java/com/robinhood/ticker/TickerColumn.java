@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (C) 2016 Robinhood Markets, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,8 +19,6 @@ package com.robinhood.ticker;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 
-import java.util.Map;
-
 /**
  * Represents a column of characters to be drawn on the screen. This class primarily handles
  * animating within the column from one character to the next and drawing all of the intermediate
@@ -29,8 +27,7 @@ import java.util.Map;
  * @author Jin Cao, Robinhood
  */
 class TickerColumn {
-    private final char[] characterList;
-    private final Map<Character, Integer> characterIndicesMap;
+    private final TickerCharacterList[] characterLists;
     private final TickerDrawMetrics metrics;
 
     private char currentChar = TickerUtils.EMPTY_CHAR;
@@ -39,6 +36,7 @@ class TickerColumn {
     // The indices characters simply signify what positions are for the current and target
     // characters in the assigned characterList. This tells us how to animate from the current
     // to the target characters.
+    private char[] currentCharacterList;
     private int startIndex;
     private int endIndex;
 
@@ -59,10 +57,8 @@ class TickerColumn {
     private float previousBottomDelta;
     private int directionAdjustment;
 
-    TickerColumn(char[] characterList, Map<Character, Integer> characterIndicesMap,
-            TickerDrawMetrics metrics) {
-        this.characterList = characterList;
-        this.characterIndicesMap = characterIndicesMap;
+    TickerColumn(TickerCharacterList[] characterLists, TickerDrawMetrics metrics) {
+        this.characterLists = characterLists;
         this.metrics = metrics;
     }
 
@@ -91,15 +87,21 @@ class TickerColumn {
         currentBottomDelta = 0f;
     }
 
+    char getCurrentChar() {
+        return currentChar;
+    }
+
     char getTargetChar() {
         return targetChar;
     }
 
     float getCurrentWidth() {
+        checkForDrawMetricsChanges();
         return currentWidth;
     }
 
     float getMinimumRequiredWidth() {
+        checkForDrawMetricsChanges();
         return minimumRequiredWidth;
     }
 
@@ -108,14 +110,44 @@ class TickerColumn {
      * current and target characters for the animation.
      */
     private void setCharacterIndices() {
-        if (!characterIndicesMap.containsKey(currentChar) ||
-                !characterIndicesMap.containsKey(targetChar)) {
-            throw new IllegalStateException("No indices found for chars: " +
-                    currentChar + " " + targetChar);
+        currentCharacterList = null;
+
+        for (int i = 0; i < characterLists.length; i++) {
+            final TickerCharacterList.CharacterIndices indices =
+                    characterLists[i].getCharacterIndices(currentChar, targetChar);
+            if (indices != null) {
+                this.currentCharacterList = this.characterLists[i].getCharacterList();
+                this.startIndex = indices.startIndex;
+                this.endIndex = indices.endIndex;
+            }
         }
 
-        startIndex = characterIndicesMap.get(currentChar);
-        endIndex = characterIndicesMap.get(targetChar);
+        // If we didn't find a list that contains both characters, just perform a default animation
+        // going straight from source to target
+        if (currentCharacterList == null) {
+            if (currentChar == targetChar) {
+                currentCharacterList = new char[] {currentChar};
+                startIndex = endIndex = 0;
+            } else {
+                currentCharacterList = new char[] {currentChar, targetChar};
+                startIndex = 0;
+                endIndex = 1;
+            }
+        }
+    }
+
+    void onAnimationEnd() {
+        checkForDrawMetricsChanges();
+        minimumRequiredWidth = currentWidth;
+    }
+
+    private void checkForDrawMetricsChanges() {
+        final float currentTargetWidth = metrics.getCharWidth(targetChar);
+        // Only resize due to DrawMetrics changes when we are done with whatever animation we
+        // are running.
+        if (currentWidth == targetWidth && targetWidth != currentTargetWidth) {
+            this.minimumRequiredWidth = this.currentWidth = this.targetWidth = currentTargetWidth;
+        }
     }
 
     void setAnimationProgress(float animationProgress) {
@@ -176,28 +208,30 @@ class TickerColumn {
      * in the correct position on the canvas.
      */
     void draw(Canvas canvas, Paint textPaint) {
-        if (drawText(canvas, textPaint, characterList, bottomCharIndex, bottomDelta)) {
+        if (drawText(canvas, textPaint, currentCharacterList, bottomCharIndex, bottomDelta)) {
             // Save the current drawing state in case our animation gets interrupted
-            currentChar = characterList[bottomCharIndex];
+            if (bottomCharIndex >= 0) {
+                currentChar = currentCharacterList[bottomCharIndex];
+            }
             currentBottomDelta = bottomDelta;
         }
 
         // Draw the corresponding top and bottom characters if applicable
-        drawText(canvas, textPaint, characterList, bottomCharIndex + 1,
+        drawText(canvas, textPaint, currentCharacterList, bottomCharIndex + 1,
                 bottomDelta - charHeight);
         // Drawing the bottom character here might seem counter-intuitive because we've been
         // computing for the bottom character this entire time. But the bottom character
         // computed above might actually be above the baseline if we interrupted a previous
         // animation that gave us a positive additionalDelta.
-        drawText(canvas, textPaint, characterList, bottomCharIndex - 1,
+        drawText(canvas, textPaint, currentCharacterList, bottomCharIndex - 1,
                 bottomDelta + charHeight);
     }
 
     /**
      * @return whether the text was successfully drawn on the canvas
      */
-    private boolean drawText(Canvas canvas, Paint textPaint, char[] characterList, int index,
-            float verticalOffset) {
+    private boolean drawText(Canvas canvas, Paint textPaint, char[] characterList,
+            int index, float verticalOffset) {
         if (index >= 0 && index < characterList.length) {
             canvas.drawText(characterList, index, 1, 0f, verticalOffset, textPaint);
             return true;

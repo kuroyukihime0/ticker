@@ -1,21 +1,23 @@
-/**
- * Copyright (C) 2016 Robinhood Markets, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+/*
+  Copyright (C) 2016 Robinhood Markets, Inc.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
  */
 
 package com.robinhood.ticker;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.annotation.TargetApi;
 import android.content.Context;
@@ -28,6 +30,7 @@ import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.text.TextPaint;
+import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -38,7 +41,7 @@ import android.view.animation.Interpolator;
 /**
  * The primary view for showing a ticker text view that handles smoothly scrolling from the
  * current text to a given text. The scrolling behavior is defined by
- * {@link #setCharacterList(char[])} which dictates what characters come in between the starting
+ * {@link #setCharacterLists} which dictates what characters come in between the starting
  * and ending characters.
  *
  * <p>This class primarily handles the drawing customization of the ticker view, for example
@@ -65,18 +68,24 @@ public class TickerView extends View {
 
     private final TickerDrawMetrics metrics = new TickerDrawMetrics(textPaint);
     private final TickerColumnManager columnManager = new TickerColumnManager(metrics);
+    private final ValueAnimator animator = ValueAnimator.ofFloat(1f);
 
     // Minor optimizations for re-positioning the canvas for the composer.
     private final Rect viewBounds = new Rect();
 
-    private ValueAnimator animator;
+    private String text;
+
+    private int lastMeasuredDesiredWidth, lastMeasuredDesiredHeight;
 
     // View attributes, defaults are set in init().
-    private float textSize;
+    private int gravity;
     private int textColor;
+    private float textSize;
+    private int textStyle;
+    private long animationDelayInMillis;
     private long animationDurationInMillis;
     private Interpolator animationInterpolator;
-    private int gravity;
+    private boolean animateMeasurementChange;
 
     public TickerView(Context context) {
         super(context);
@@ -105,63 +114,126 @@ public class TickerView extends View {
      *     <li>app:textColor
      *     <li>app:textSize
      * </ul>
+     *
+     * @param context context from constructor
+     * @param attrs attrs from constructor
+     * @param defStyleAttr defStyleAttr from constructor
+     * @param defStyleRes defStyleRes from constructor
      */
     protected void init(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         final Resources res = context.getResources();
-
-        int textColor = DEFAULT_TEXT_COLOR;
-        float textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, DEFAULT_TEXT_SIZE,
-                res.getDisplayMetrics());
-        int animationDurationInMillis = DEFAULT_ANIMATION_DURATION;
-        int gravity = DEFAULT_GRAVITY;
+        final StyledAttributes styledAttributes = new StyledAttributes(res);
 
         // Set the view attributes from XML or from default values defined in this class
-        final TypedArray arr = context.obtainStyledAttributes(attrs, R.styleable.ticker_TickerView,
+        final TypedArray arr = context.obtainStyledAttributes(attrs, R.styleable.TickerView,
                 defStyleAttr, defStyleRes);
 
         final int textAppearanceResId = arr.getResourceId(
-                R.styleable.ticker_TickerView_android_textAppearance, -1);
+                R.styleable.TickerView_android_textAppearance, -1);
 
         // Check textAppearance first
         if (textAppearanceResId != -1) {
             final TypedArray textAppearanceArr = context.obtainStyledAttributes(
-                    textAppearanceResId,
-                    new int[] {
-                            // TODO: having textColor first here does not work, why?
-                            android.R.attr.textSize,
-                            android.R.attr.textColor,
-                    });
-
-            textSize = textAppearanceArr.getDimension(0, textSize);
-            textColor = textAppearanceArr.getColor(1, textColor);
-
+                    textAppearanceResId, R.styleable.TickerView);
+            styledAttributes.applyTypedArray(textAppearanceArr);
             textAppearanceArr.recycle();
         }
 
         // Custom set attributes on the view should override textAppearance if applicable.
-        animationDurationInMillis = arr.getInt(
-                R.styleable.ticker_TickerView_ticker_animationDuration, animationDurationInMillis);
-        gravity = arr.getInt(R.styleable.ticker_TickerView_android_gravity, gravity);
-        textColor = arr.getColor(R.styleable.ticker_TickerView_android_textColor, textColor);
-        textSize = arr.getDimension(R.styleable.ticker_TickerView_android_textSize, textSize);
+        styledAttributes.applyTypedArray(arr);
 
         // After we've fetched the correct values for the attributes, set them on the view
         animationInterpolator = DEFAULT_ANIMATION_INTERPOLATOR;
-        this.animationDurationInMillis = animationDurationInMillis;
-        this.gravity = gravity;
-        setTextColor(textColor);
-        setTextSize(textSize);
+        this.animationDurationInMillis = arr.getInt(
+                R.styleable.TickerView_ticker_animationDuration, DEFAULT_ANIMATION_DURATION);
+        this.animateMeasurementChange = arr.getBoolean(
+                R.styleable.TickerView_ticker_animateMeasurementChange, false);
+        this.gravity = styledAttributes.gravity;
+
+        if (styledAttributes.shadowColor != 0) {
+            textPaint.setShadowLayer(styledAttributes.shadowRadius, styledAttributes.shadowDx,
+                    styledAttributes.shadowDy, styledAttributes.shadowColor);
+        }
+        if (styledAttributes.textStyle != 0) {
+            textStyle = styledAttributes.textStyle;
+            setTypeface(textPaint.getTypeface());
+        }
+
+        setTextColor(styledAttributes.textColor);
+        setTextSize(styledAttributes.textSize);
+
+        final int defaultCharList =
+                arr.getInt(R.styleable.TickerView_ticker_defaultCharacterList, 0);
+        switch (defaultCharList) {
+            case 1:
+                setCharacterLists(TickerUtils.provideNumberList());
+                break;
+            case 2:
+                setCharacterLists(TickerUtils.provideAlphabeticalList());
+                break;
+            default:
+                if (isInEditMode()) {
+                    setCharacterLists(TickerUtils.provideNumberList());
+                }
+        }
+
+        setText(styledAttributes.text, false);
 
         arr.recycle();
 
-        animator = ValueAnimator.ofFloat(1f);
         animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
             @Override
             public void onAnimationUpdate(ValueAnimator animation) {
-                columnManager.setAnimationProgress(animation.getAnimatedFraction());
+                columnManager.setAnimationProgress(
+                        animation.getAnimatedFraction());
+                checkForRelayout();
                 invalidate();
             }
         });
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                columnManager.onAnimationEnd();
+                checkForRelayout();
+                invalidate();
+            }
+        });
+    }
+
+    /**
+     * Only attributes that can be applied from `android:textAppearance` should be added here.
+     */
+    private class StyledAttributes {
+        int gravity;
+        int shadowColor;
+        float shadowDx;
+        float shadowDy;
+        float shadowRadius;
+        String text;
+        int textColor;
+        float textSize;
+        int textStyle;
+
+        StyledAttributes(Resources res) {
+            textColor = DEFAULT_TEXT_COLOR;
+            textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP,
+                    DEFAULT_TEXT_SIZE, res.getDisplayMetrics());
+            gravity = DEFAULT_GRAVITY;
+        }
+
+        void applyTypedArray(TypedArray arr) {
+            gravity = arr.getInt(R.styleable.TickerView_android_gravity, gravity);
+            shadowColor = arr.getColor(R.styleable.TickerView_android_shadowColor,
+                    shadowColor);
+            shadowDx = arr.getFloat(R.styleable.TickerView_android_shadowDx, shadowDx);
+            shadowDy = arr.getFloat(R.styleable.TickerView_android_shadowDy, shadowDy);
+            shadowRadius = arr.getFloat(R.styleable.TickerView_android_shadowRadius,
+                    shadowRadius);
+            text = arr.getString(R.styleable.TickerView_android_text);
+            textColor = arr.getColor(R.styleable.TickerView_android_textColor, textColor);
+            textSize = arr.getDimension(R.styleable.TickerView_android_textSize, textSize);
+            textStyle = arr.getInt(R.styleable.TickerView_android_textStyle, textStyle);
+        }
     }
 
 
@@ -169,36 +241,33 @@ public class TickerView extends View {
 
 
     /**
-     * This is the primary API that the view uses to determine how to animate from one character
-     * to another. The provided character array dictates what characters will appear between
+     * This is the primary class that Ticker uses to determine how to animate from one character
+     * to another. The provided strings dictates what characters will appear between
      * the start and end characters.
      *
-     * <p>For example, given the list [a,b,c,d,e], if the view wants to animate from 'd' to 'a',
-     * it will know that it has to go from 'd' to 'c' to 'b' to 'a', and these are the characters
+     * <p>For example, given the string "abcde", if the view wants to animate from 'd' to 'b',
+     * it will know that it has to go from 'd' to 'c' to 'b', and these are the characters
      * that show up during the animation scroll.
      *
-     * <p>You can find some helpful character list generators in {@link TickerUtils}.
+     * <p>We allow for multiple character lists, and the character lists will be prioritized with
+     * latter lists given a higher priority than the previous lists. e.g. given "123" and "13",
+     * an animation from 1 to 3 will use the sequence [1,3] rather than [1,2,3].
      *
-     * <p>Special note: the character list must contain {@link TickerUtils#EMPTY_CHAR} because the
-     * ticker needs to know how to animate from empty to another character (e.g. when the length
-     * of the string changes).
+     * <p>You can find some helpful character list in {@link TickerUtils}.
      *
-     * @param characterList the character array that dictates character orderings.
+     * @param characterLists the list of character lists that dictates animation.
      */
-    public void setCharacterList(char[] characterList) {
-        boolean foundEmpty = false;
-        for (char character : characterList) {
-            if (character == TickerUtils.EMPTY_CHAR) {
-                foundEmpty = true;
-                break;
-            }
-        }
+    public void setCharacterLists(String... characterLists) {
+        columnManager.setCharacterLists(characterLists);
+    }
 
-        if (!foundEmpty) {
-            throw new IllegalArgumentException("Missing TickerUtils#EMPTY_CHAR in character list");
-        }
-
-        columnManager.setCharacterList(characterList);
+    /**
+     * @return whether or not the character lists (via {@link #setCharacterLists}) have been set.
+     *         Can use this value to determine if you need to call {@link #setCharacterLists}
+     *         before calling {@link #setText}.
+     */
+    public boolean isCharacterListsSet() {
+        return columnManager.getCharacterLists() != null;
     }
 
     /**
@@ -209,7 +278,7 @@ public class TickerView extends View {
      * @param text the text to display.
      */
     public void setText(String text) {
-        setText(text, columnManager.getCurrentWidth() > 0);
+        setText(text, !TextUtils.isEmpty(this.text));
     }
 
     /**
@@ -219,17 +288,16 @@ public class TickerView extends View {
      * @param text the text to display.
      * @param animate whether to animate to text.
      */
-    public synchronized void setText(String text, boolean animate) {
-        final char[] targetText = text == null ? new char[0] : text.toCharArray();
-
-        if (columnManager.shouldDebounceText(targetText)) {
+    public void setText(String text, boolean animate) {
+        if (TextUtils.equals(text, this.text)) {
             return;
         }
 
-        columnManager.setText(targetText, animate);
-        columnManager.setAnimationProgress(animate ? 0f : 1f);
+        this.text = text;
+        final char[] targetText = text == null ? new char[0] : text.toCharArray();
+
+        columnManager.setText(targetText);
         setContentDescription(text);
-        checkForRelayout();
 
         if (animate) {
             // Kick off the animator that draws the transition
@@ -237,12 +305,26 @@ public class TickerView extends View {
                 animator.cancel();
             }
 
+            animator.setStartDelay(animationDelayInMillis);
             animator.setDuration(animationDurationInMillis);
             animator.setInterpolator(animationInterpolator);
             animator.start();
         } else {
+            columnManager.setAnimationProgress(1f);
+            columnManager.onAnimationEnd();
+            checkForRelayout();
             invalidate();
         }
+    }
+
+    /**
+     * Get the last set text on the view. This does not equate to the current shown text on the
+     * UI because the animation might not have started or finished yet.
+     *
+     * @return last set text on this view.
+     */
+    public String getText() {
+        return text;
     }
 
     /**
@@ -300,8 +382,33 @@ public class TickerView extends View {
      * @param typeface the typeface to use on the text.
      */
     public void setTypeface(Typeface typeface) {
+        if (textStyle == Typeface.BOLD_ITALIC) {
+            typeface = Typeface.create(typeface, Typeface.BOLD_ITALIC);
+        } else if (textStyle == Typeface.BOLD) {
+            typeface = Typeface.create(typeface, Typeface.BOLD);
+        } else if (textStyle == Typeface.ITALIC) {
+            typeface = Typeface.create(typeface, Typeface.ITALIC);
+        }
+
         textPaint.setTypeface(typeface);
         onTextPaintMeasurementChanged();
+    }
+
+    /**
+     * @return the delay in milliseconds before the transition animations runs
+     */
+    public long getAnimationDelay() {
+        return animationDelayInMillis;
+    }
+
+    /**
+     * Sets the delay in milliseconds before this TickerView runs its transition animations. The
+     * default animation delay is 0.
+     *
+     * @param animationDelayInMillis the delay in milliseconds.
+     */
+    public void setAnimationDelay(long animationDelayInMillis) {
+        this.animationDelayInMillis = animationDelayInMillis;
     }
 
     /**
@@ -359,6 +466,51 @@ public class TickerView extends View {
         }
     }
 
+    /**
+     * Enables/disables the flag to animate measurement changes. If this flag is enabled, any
+     * animation that changes the content's text width (e.g. 9999 to 10000) will have the view's
+     * measured width animated along with the text width. However, a side effect of this is that
+     * the entering/exiting character might get truncated by the view's view bounds as the width
+     * shrinks or expands.
+     *
+     * <p>Warning: using this feature may degrade performance as it will force a re-measure and
+     * re-layout during each animation frame.
+     *
+     * <p>This flag is disabled by default.
+     *
+     * @param animateMeasurementChange whether or not to animate measurement changes.
+     */
+    public void setAnimateMeasurementChange(boolean animateMeasurementChange) {
+        this.animateMeasurementChange = animateMeasurementChange;
+    }
+
+    /**
+     * @return whether or not we are currently animating measurement changes.
+     */
+    public boolean getAnimateMeasurementChange() {
+        return animateMeasurementChange;
+    }
+
+    /**
+     * Adds a custom {@link android.animation.Animator.AnimatorListener} to listen to animator
+     * update events used by this view.
+     *
+     * @param animatorListener the custom animator listener.
+     */
+    public void addAnimatorListener(Animator.AnimatorListener animatorListener) {
+        animator.addListener(animatorListener);
+    }
+
+    /**
+     * Removes the specified custom {@link android.animation.Animator.AnimatorListener} from
+     * this view.
+     *
+     * @param animatorListener the custom animator listener.
+     */
+    public void removeAnimatorListener(Animator.AnimatorListener animatorListener) {
+        animator.removeListener(animatorListener);
+    }
+
 
     /********** END PUBLIC API **********/
 
@@ -368,13 +520,18 @@ public class TickerView extends View {
      * we set for the previous view state.
      */
     private void checkForRelayout() {
-        if (getWidth() != computeDesiredWidth() || getHeight() != computeDesiredHeight()) {
+        final boolean widthChanged = lastMeasuredDesiredWidth != computeDesiredWidth();
+        final boolean heightChanged = lastMeasuredDesiredHeight != computeDesiredHeight();
+
+        if (widthChanged || heightChanged) {
             requestLayout();
         }
     }
 
     private int computeDesiredWidth() {
-        return (int) columnManager.getMinimumRequiredWidth() + getPaddingLeft() + getPaddingRight();
+        final int contentWidth = (int) (animateMeasurementChange ?
+                columnManager.getCurrentWidth() : columnManager.getMinimumRequiredWidth());
+        return contentWidth + getPaddingLeft() + getPaddingRight();
     }
 
     private int computeDesiredHeight() {
@@ -392,32 +549,11 @@ public class TickerView extends View {
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        final int widthMode = MeasureSpec.getMode(widthMeasureSpec);
-        final int heightMode = MeasureSpec.getMode(heightMeasureSpec);
-        int desiredWidth = MeasureSpec.getSize(widthMeasureSpec);
-        int desiredHeight = MeasureSpec.getSize(heightMeasureSpec);
+        lastMeasuredDesiredWidth = computeDesiredWidth();
+        lastMeasuredDesiredHeight = computeDesiredHeight();
 
-        switch (widthMode) {
-            case MeasureSpec.EXACTLY:
-                break;
-            case MeasureSpec.AT_MOST:
-                desiredWidth = Math.min(desiredWidth, computeDesiredWidth());
-                break;
-            case MeasureSpec.UNSPECIFIED:
-                desiredWidth = computeDesiredWidth();
-                break;
-        }
-
-        switch (heightMode) {
-            case MeasureSpec.EXACTLY:
-                break;
-            case MeasureSpec.AT_MOST:
-                desiredHeight = Math.min(desiredHeight, computeDesiredHeight());
-                break;
-            case MeasureSpec.UNSPECIFIED:
-                desiredHeight = computeDesiredHeight();
-                break;
-        }
+        int desiredWidth = resolveSize(lastMeasuredDesiredWidth, widthMeasureSpec);
+        int desiredHeight = resolveSize(lastMeasuredDesiredHeight, heightMeasureSpec);
 
         setMeasuredDimension(desiredWidth, desiredHeight);
     }
